@@ -10,6 +10,8 @@ on:
 permissions:
   contents: read
   security-events: write
+  pull-requests: write
+  issues: write
 
 jobs:
   gitleaks:
@@ -161,3 +163,84 @@ jobs:
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
               summary.write("\n".join(lines) + "\n")
           PY
+
+  security-score-gate:
+    name: Security Score Gate
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - gitleaks
+      - semgrep
+      - bandit
+      - hadolint
+      - pylint
+      - pip-audit
+      - pytest
+    steps:
+      - name: Calculate score and publish result
+        uses: actions/github-script@v7
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        with:
+          script: |
+            const needs = JSON.parse(process.env.RESULTS);
+            const checks = [
+              { id: "gitleaks",  name: "Gitleaks",  weight: 20, critical: true },
+              { id: "semgrep",   name: "Semgrep",   weight: 15 },
+              { id: "bandit",    name: "Bandit",    weight: 15 },
+              { id: "pip-audit", name: "pip-audit", weight: 15 },
+              { id: "pytest",    name: "pytest",    weight: 15 },
+              { id: "pylint",    name: "Pylint",    weight: 10 },
+              { id: "hadolint",  name: "Hadolint",  weight: 10 },
+            ];
+            const THRESHOLD = 80;
+
+            let score = 0;
+            let criticalFailed = false;
+            const rows = checks.map((c) => {
+              const result = needs[c.id].result;
+              const ok = result === "success";
+              if (ok) score += c.weight;
+              if (c.critical && !ok) criticalFailed = true;
+              const label = c.critical ? `${c.name} (critical)` : c.name;
+              return `| ${label} | ${c.weight} | ${ok ? "✅" : "❌"} \`${result}\` | ${ok ? c.weight : 0} |`;
+            });
+
+            const passed = score >= THRESHOLD && !criticalFailed;
+            let reason = `Score ${score} ≥ ${THRESHOLD} and no critical failure.`;
+            if (criticalFailed) reason = "Secret leak detected: always blocked, regardless of score.";
+            else if (!passed) reason = `Score ${score} is below the minimum of ${THRESHOLD}.`;
+
+            const marker = "<!-- security-score-bot -->";
+            const body = [
+              marker,
+              "## 🤖 Security Score Bot",
+              "",
+              `**Score: ${score}/100**: ${passed ? "✅ PASSED" : "⛔ BLOCKED"}`,
+              "",
+              reason,
+              "",
+              "| Check | Weight | Result | Points |",
+              "|---|---|---|---|",
+              ...rows,
+              "",
+              `Commit: \`${context.sha.slice(0, 7)}\``,
+            ].join("\n");
+
+            await core.summary.addRaw(body, true).write();
+
+            if (context.eventName === "pull_request") {
+              const { owner, repo } = context.repo;
+              const issue_number = context.payload.pull_request.number;
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number,
+              });
+              const existing = comments.find((c) => c.body && c.body.includes(marker));
+              if (existing) {
+                await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+              } else {
+                await github.rest.issues.createComment({ owner, repo, issue_number, body });
+              }
+            }
+
+            if (!passed) core.setFailed(reason);
