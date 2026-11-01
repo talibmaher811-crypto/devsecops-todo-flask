@@ -23,6 +23,10 @@ The **Stage 1 Summary** job always runs after the seven checks and publishes a s
 - **Security Score Gate** (Stage 2): weighted score 0-100; passes at >= 80 and only if Gitleaks is green. Posts a PR comment.
 - **Stage 3** (runs only if the gate passes): Docker Build + smoke test, Trivy image scan, Syft SBOM, and on `main` a push to GHCR with Cosign keyless signing and SBOM attestation.
 
+## Stage 4
+
+On push to `main`, after the image is signed: `deploy` (runs on a self-hosted runner labelled `devsecops-vm`) verifies the Cosign signature, deploys by digest to `127.0.0.1:8080`, health-checks it and rolls back automatically on failure (`deploy/deploy.sh`). Then `zap-baseline` runs an OWASP ZAP baseline scan and uploads the HTML report.
+
 ## Run locally
 
 ```bash

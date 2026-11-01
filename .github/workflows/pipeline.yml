@@ -332,6 +332,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [trivy, sbom]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -381,3 +383,69 @@ jobs:
             echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Stage 4: deploy to the lab machine (self-hosted runner), health check with
+  # automatic rollback, then an OWASP ZAP baseline scan of the running app.
+  # Only runs on push to main, after the image has been signed.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to VM
+    runs-on: [self-hosted, linux, devsecops-vm]
+    needs: sign-publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute image reference
+        run: |
+          echo "IMAGE_REF=ghcr.io/${GITHUB_REPOSITORY,,}@${{ needs.sign-publish.outputs.digest }}" >> "$GITHUB_ENV"
+      - uses: sigstore/cosign-installer@v3
+      - name: Verify signature before deploying
+        run: |
+          cosign verify "$IMAGE_REF" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/pipeline.yml@refs/heads/main" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
+          echo "Signature verified for $IMAGE_REF"
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Deploy with health check and rollback
+        run: bash deploy/deploy.sh "$IMAGE_REF"
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Stage 4: Deploy"
+            echo ""
+            echo "- Image: \`${IMAGE_REF}\`"
+            echo "- Result: **${{ job.status }}**"
+            echo "- URL on the VM: http://127.0.0.1:8080/"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  zap-baseline:
+    name: OWASP ZAP Baseline
+    runs-on: [self-hosted, linux, devsecops-vm]
+    needs: deploy
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Prepare report directory
+        run: |
+          mkdir -p zap-out
+          chmod 777 zap-out
+      - name: Run ZAP baseline scan against the deployed app
+        run: |
+          docker run --rm --network host \
+            -v "$PWD/zap-out:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t http://127.0.0.1:8080 -r zap-report.html -I
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zap-report
+          path: zap-out/zap-report.html
