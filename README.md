@@ -18,6 +18,11 @@ Seven independent checks run in parallel on pushes to `main`, pull requests targ
 
 The **Stage 1 Summary** job always runs after the seven checks and publishes a score in the Actions run summary. The PR score gate (such as a minimum score of 80) is intentionally left for Stage 2.
 
+## Stage 2 and Stage 3
+
+- **Security Score Gate** (Stage 2): weighted score 0-100; passes at >= 80 and only if Gitleaks is green. Posts a PR comment.
+- **Stage 3** (runs only if the gate passes): Docker Build + smoke test, Trivy image scan, Syft SBOM, and on `main` a push to GHCR with Cosign keyless signing and SBOM attestation.
+
 ## Run locally
 
 ```bash
