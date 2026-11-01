@@ -1,0 +1,163 @@
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  gitleaks:
+    name: Gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  semgrep:
+    name: Semgrep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Semgrep
+        run: python -m pip install semgrep
+      - name: Run Semgrep
+        run: semgrep scan --config auto --error app.py
+
+  bandit:
+    name: Bandit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Bandit
+        run: python -m pip install bandit
+      - name: Scan Python source
+        run: bandit -r app.py -ll
+
+  hadolint:
+    name: Hadolint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+
+  pylint:
+    name: Pylint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pylint Flask
+      - name: Run Pylint
+        run: pylint app.py --fail-under=8.0
+
+  pip-audit:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pip-audit
+        run: python -m pip install pip-audit
+      - name: Audit dependencies
+        run: pip-audit -r requirements.txt
+
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install application and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+      - name: Run tests with coverage
+        run: pytest --cov=app --cov-report=term-missing --cov-fail-under=80
+
+  stage1-summary:
+    name: Stage 1 Summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - gitleaks
+      - semgrep
+      - bandit
+      - hadolint
+      - pylint
+      - pip-audit
+      - pytest
+    steps:
+      - name: Calculate and publish score
+        env:
+          GITLEAKS: ${{ needs.gitleaks.result }}
+          SEMGREP: ${{ needs.semgrep.result }}
+          BANDIT: ${{ needs.bandit.result }}
+          HADOLINT: ${{ needs.hadolint.result }}
+          PYLINT: ${{ needs.pylint.result }}
+          PIP_AUDIT: ${{ needs.pip-audit.result }}
+          PYTEST: ${{ needs.pytest.result }}
+        run: |
+          python - <<'PY'
+          import os
+
+          checks = {
+              "Gitleaks": os.environ["GITLEAKS"],
+              "Semgrep": os.environ["SEMGREP"],
+              "Bandit": os.environ["BANDIT"],
+              "Hadolint": os.environ["HADOLINT"],
+              "Pylint": os.environ["PYLINT"],
+              "pip-audit": os.environ["PIP_AUDIT"],
+              "pytest": os.environ["PYTEST"],
+          }
+          passed = sum(result == "success" for result in checks.values())
+          score = round((passed / len(checks)) * 100)
+          lines = [
+              "## Stage 1 Security & Quality Summary",
+              "",
+              f"**Score: {score}/100 ({passed}/{len(checks)} checks passed)**",
+              "",
+              "| Check | Result |",
+              "|---|---|",
+          ]
+          for name, result in checks.items():
+              icon = "✅" if result == "success" else "❌"
+              lines.append(f"| {name} | {icon} `{result}` |")
+          lines.extend([
+              "",
+              "> Stage 1 reports the score. The PR score gate (for example, threshold >= 80) is planned for Stage 2.",
+          ])
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("\n".join(lines) + "\n")
+          PY
