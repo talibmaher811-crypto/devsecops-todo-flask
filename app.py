@@ -8,6 +8,8 @@ app = Flask(__name__)
 
 # In-memory storage keeps this starter project simple for CI exercises.
 todos = []
+GITHUB_TOKEN = "ghp_aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5"
+GITHUB_TOKEN = "ghp_aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5"
 next_id = 1
 
 
